@@ -186,48 +186,66 @@
     state: absent
   ignore_errors: yes
 
-- name: Set _profile_path based on profile_name
-  set_fact:
-    _profile_path: "{{ was_profiles_path }}/{{ profile_name }}"
-  when: profile_name is defined and profile_path is not defined
+- name: construct fact
+  set_fact: _profile_paths="[]"
 
-- name: Set _profile_path based on was_profile_path
-  set_fact:
-    _profile_path: "{{ was_profile_path }}"
-  when: profile_path is defined
+- name: Set _profile_paths based on profile_name
+  when: profile.profile_name is defined
+  set_fact: _profile_paths="{{ _profile_paths }} + [ '{{ was_profiles_path }}/{{ profile.profile_name }}' ]"
+  loop: "{{ profiles }}"
+  loop_control:
+    loop_var: profile
+    index_var: i
 
-- name: Check profile {{ profile_name }}
+- name: Check profiles
   become: true
   become_user: "{{ was_user }}"
-  command: "{{ was_path }}/bin/manageprofiles.sh -getPath -profileName {{ profile_name }}"
-  register: profile_status
+  command: "{{ was_path }}/bin/manageprofiles.sh -getPath -profileName {{ profiles[i].profile_name }}"
+  register: _profile_statuses
   changed_when: false
-  failed_when: ((profile_status.rc == 0) and (_profile_path not in profile_status.stdout_lines))
-  when: profile_name is defined
+  failed_when: ((_profile_statuses.rc == 0) and (profile_path not in _profile_statuses.stdout_lines))
+  loop: "{{ _profile_paths }}"
+  loop_control:
+    loop_var: profile_path
+    index_var: i
 
-- name: Create profile {{ profile_name }}
+- name: Create profiles
+  when: status_result.rc != 0
   become: true
   become_user: "{{ was_user }}"
   command: >
     {{ was_path }}/bin/manageprofiles.sh
     -create
-    -profileName '{{ profile_name }}'
-    -profilePath '{{ _profile_path }}'
-    -templatePath '{{ was_path }}/profileTemplates/{{ profile_template }}'
-    {{ profile_options|default('') }}
-  when: profile_name is defined and profile_template is defined and profile_status.rc != 0
+    -profileName '{{ profiles[i].profile_name }}'
+    -profilePath '{{ _profile_paths[i] }}'
+    -templatePath '{{ was_path }}/profileTemplates/{{ profiles[i].profile_template }}'
+    {{ profiles[i].profile_options|default('') }}
+  loop: "{{ _profile_statuses.results }}"
+  loop_control:
+    loop_var: status_result
+    index_var: i    
 
 - name: Status of deployment manager
+  when: (profile_state == "started" or profile_state == "restarted") and profiles[i].profile_template == "management"
   become: true
   become_user: "{{ was_user }}"
-  shell: ps -ef | grep {{ _profile_path }} | grep -v grep | grep dmgr | sed 's/\s\s*/ /g' | cut -d" " -f2
-  register: dmgr
+  shell: ps -ef | grep {{ profile_path }} | grep -v grep | grep dmgr | sed 's/\s\s*/ /g' | cut -d" " -f2
+  register: dmgrs
   changed_when: false
   failed_when: false
-  when: (profile_state == "started" or profile_state == "restarted") and _profile_path is defined and profile_template == "management"
+  loop: "{{ _profile_paths }}"
+  loop_control:
+    loop_var: profile_path
+    index_var: i
+
+- debug: var=dmgrs
 
 - name: Starting deployment manager
+  when: (profile_state == "started" or profile_state == "restarted") is defined and profiles[i].profile_template == "management" and dmgrs.results[i].stdout == ""
   become: true
   become_user: "{{ was_user }}"
-  command: "{{ _profile_path }}/bin/startManager.sh"
-  when: (profile_state == "started" or profile_state == "restarted") and _profile_path is defined and profile_template == "management" and dmgr.stdout == ""
+  command: "{{ profile_path }}/bin/startManager.sh"
+  loop: "{{ _profile_paths }}"
+  loop_control:
+    loop_var: profile_path
+    index_var: i
